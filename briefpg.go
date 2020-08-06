@@ -216,6 +216,9 @@ func (bp *BriefPG) mkTemp() error {
 	return nil
 }
 
+// DbDir returns the installation directory of the Postgres database.  In
+// general, this should not be needed when writing tests, but it is provided
+// for completeness.
 func (bp *BriefPG) DbDir() string {
 	return filepath.Join(bp.TmpDir, bp.PgVer)
 }
