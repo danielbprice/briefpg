@@ -12,3 +12,5 @@ briefpg makes it easy to create Go tests backed by a live, temporary Postgres da
 This project is based on the concepts from the very nice package [ephemeralpg](https://github.com/eradman/ephemeralpg/) by Eric Radman.  Perhaps we should have called it `gophemeralpg`? 
 
 The author also wishes to express gratitude to my employer Brightgate, which allowed its release to Open Source.  And to [Danek Duvall](https://github.com/dhduvall) who helped to review, refine, and fix bugs (unfortunately some of the commit history is lost in the transition to Open Source).
+
+*The interface should be regarded as unstable at the moment (as of this writing, August 2020).  We are working towards a stable 1.0 release.*
