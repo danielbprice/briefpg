@@ -13,6 +13,7 @@ package briefpg
 import (
 	"context"
 	"os"
+	"regexp"
 	"testing"
 )
 
@@ -26,13 +27,23 @@ func TestPostgresInstalled(t *testing.T) {
 	if err == nil {
 		t.Fatalf("PostgresInstalled expected to fail: %v", err)
 	}
+
+	_, err = New(OptPostgresPath("/bogus/path"))
+	if err == nil {
+		t.Fatalf("New with bogus path expected to fail: %v", err)
+	}
 }
 
 func TestBrief(t *testing.T) {
 	ctx := context.Background()
-	bpg, err := NewWithOptions("", t.Logf)
+	bpg, err := New(OptLogFunc(t.Logf))
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
+	}
+	ver := bpg.PgVer()
+	matched, err := regexp.Match("[0-9]+.", []byte(ver))
+	if err != nil || !matched {
+		t.Fatalf("Unexpected version: %v", ver)
 	}
 	err = bpg.Start(ctx)
 	if err != nil {
@@ -43,7 +54,7 @@ func TestBrief(t *testing.T) {
 
 func TestCreateDB(t *testing.T) {
 	ctx := context.Background()
-	bpg, err := NewWithOptions("", t.Logf)
+	bpg, err := New(OptLogFunc(t.Logf))
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -61,7 +72,7 @@ func TestCreateDB(t *testing.T) {
 
 func TestDumpDB(t *testing.T) {
 	ctx := context.Background()
-	bpg, err := NewWithOptions("", t.Logf)
+	bpg, err := New(OptLogFunc(t.Logf))
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}

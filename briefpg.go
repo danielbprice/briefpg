@@ -66,12 +66,12 @@ const (
 	stateDefunct
 )
 
-// LogFunc describes a basic printf-style function.
-type LogFunc func(string, ...interface{})
+// LogFunction describes a basic printf-style function.
+type LogFunction func(string, ...interface{})
 
-// NullLogFunc can be used to suppress output from briefpg.  (It is the
+// NullLogFunction can be used to suppress output from briefpg.  (It is the
 // default).
-func NullLogFunc(format string, a ...interface{}) {
+func NullLogFunction(format string, a ...interface{}) {
 }
 
 type cmdMap map[string]string
@@ -79,12 +79,12 @@ type cmdMap map[string]string
 // BriefPG represents a managed instance of the Postgres database server; the
 // instance and all associated data is disposed when Fini() is called.
 type BriefPG struct {
-	TmpDir         string  // Can be user-set if desired
-	Encoding       string  // Defaults to "UNICODE"
-	Logf           LogFunc // Verbose output
-	DirPrefix      string  // Directory component prefix (e.g. "briefpg.jane.")
-	PgVer          string  // Detected postgres version
-	PgConfTemplate string  // Postgres Config File template
+	TmpDir         string      // Can be user-set if desired
+	Encoding       string      // Defaults to "UNICODE"
+	DirPrefix      string      // Directory component prefix (e.g. "briefpg.jane.")
+	pgVer          string      // Detected postgres version
+	PgConfTemplate string      // Postgres Config File template
+	logf           LogFunction // Verbose output
 	state          bpState
 	pgCmds         cmdMap
 }
@@ -160,18 +160,16 @@ func PostgresInstalled(path string) error {
 	return err
 }
 
-// NewWithOptions returns an instance of BriefPG; if path is "", then attempt
-// to automatically locate an instance of Postgres by first scanning the users
-// $PATH environment variable.  If that fails, try a series of well-known
-// installation locations.
-func NewWithOptions(path string, logf LogFunc) (*BriefPG, error) {
-	if logf == nil {
-		logf = NullLogFunc
-	}
+// New returns an instance of BriefPG; if no PostgresPath option is present,
+// attempt to automatically locate an instance of Postgres by first scanning
+// the user's $PATH environment variable.  If that fails, try a series of
+// well-known installation locations.  See the documentation for specific
+// Options to understand what they do.
+func New(options ...Option) (*BriefPG, error) {
 	bpg := &BriefPG{
 		state:          stateUninitialized,
 		Encoding:       "UNICODE",
-		Logf:           logf,
+		logf:           NullLogFunction,
 		DirPrefix:      "briefpg.",
 		pgCmds:         nil,
 		PgConfTemplate: DefaultPgConfTemplate,
@@ -183,28 +181,43 @@ func NewWithOptions(path string, logf LogFunc) (*BriefPG, error) {
 		bpg.DirPrefix = fmt.Sprintf("briefpg.%s.", user.Username)
 	}
 
-	pgCmds, err := findPostgres(path)
-	if err != nil {
-		return nil, err
+	for _, o := range options {
+		err = o.apply(bpg)
+		if err != nil {
+			return nil, xerrors.Errorf("Failed applying option: %w", err)
+		}
 	}
-	bpg.pgCmds = pgCmds
 
-	outb, err := exec.Command(pgCmds["psql"], "-V").Output()
+	// We've applied options-- if there isn't a specified postgres dir, go
+	// look for it.
+	if bpg.pgCmds == nil {
+		err := bpg.setPostgresPath("")
+		if err != nil {
+			return nil, xerrors.Errorf("Unable to find Postgres")
+		}
+	}
+
+	outb, err := exec.Command(bpg.pgCmds["pg_ctl"], "-V").Output()
 	if err != nil {
-		return nil, xerrors.Errorf("Failed running psql -V: %w", err)
+		return nil, xerrors.Errorf("Failed running pg_ctl -V: %w", err)
 	}
 	out := strings.TrimSpace(string(outb))
 	sl := strings.Split(out, " ")
-	bpg.PgVer = sl[len(sl)-1]
+	bpg.pgVer = sl[len(sl)-1]
 	return bpg, nil
 }
 
-// New returns an instance of BriefPG with default options.  It will
-// automatically locate an instance of Postgres by first scanning the user's
-// $PATH environment variable.  If that fails, it tries a series of well-known
-// installation locations.
-func New() (*BriefPG, error) {
-	return NewWithOptions("", nil)
+func (bp *BriefPG) SetOption(o Option) error {
+	return o.apply(bp)
+}
+
+func (bp *BriefPG) setPostgresPath(pgPath string) error {
+	var err error
+	bp.pgCmds, err = findPostgres(pgPath)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (bp *BriefPG) mkTemp() error {
@@ -216,11 +229,16 @@ func (bp *BriefPG) mkTemp() error {
 	return nil
 }
 
+// PgVer returns the detected version of Postgres, as returned by
+func (bp *BriefPG) PgVer() string {
+	return bp.pgVer
+}
+
 // DbDir returns the installation directory of the Postgres database.  In
 // general, this should not be needed when writing tests, but it is provided
 // for completeness.
 func (bp *BriefPG) DbDir() string {
-	return filepath.Join(bp.TmpDir, bp.PgVer)
+	return filepath.Join(bp.TmpDir, bp.pgVer)
 }
 
 func (bp *BriefPG) initDB(ctx context.Context) error {
@@ -236,15 +254,15 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 
 	if _, err := os.Stat(bp.DbDir()); err != nil {
 		cmd := exec.Command(bp.pgCmds["initdb"], "--nosync", "-U", "postgres", "-D", bp.DbDir(), "-E", bp.Encoding, "-A", "trust")
-		bp.Logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
+		bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 		cmdOut, err := cmd.CombinedOutput()
-		bp.Logf("briefpg: %s\n", string(cmdOut))
 		if err != nil {
+			bp.logf("briefpg: FAILED: %s\n", string(cmdOut))
 			return wrapExecErr("initDB failed", cmd, err)
 		}
 	}
 	confFile := filepath.Join(bp.DbDir(), "postgresql.conf")
-	bp.Logf("briefpg: generating %s\n", confFile)
+	bp.logf("briefpg: generating %s\n", confFile)
 	tmpl, err := template.New("postgresql.conf").Parse(bp.PgConfTemplate)
 	if err != nil {
 		return xerrors.Errorf("initDB failed to parse postgresql.conf template: %w", err)
@@ -286,10 +304,10 @@ func (bp *BriefPG) Start(ctx context.Context) error {
 	postgresOpts := fmt.Sprintf("-c listen_addresses='' %s", userOpts)
 	logFile := filepath.Join(bp.DbDir(), "postgres.log")
 	cmd := exec.Command(bp.pgCmds["pg_ctl"], "-w", "-o", postgresOpts, "-s", "-D", bp.DbDir(), "-l", logFile, "start")
-	bp.Logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
+	bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 	cmdOut, err := cmd.CombinedOutput()
-	bp.Logf("briefpg: %s\n", string(cmdOut))
 	if err != nil {
+		bp.logf("briefpg: %s\n", string(cmdOut))
 		return wrapExecErr("Start failed", cmd, err)
 	}
 	bp.state = stateServerStarted
@@ -306,10 +324,10 @@ func (bp *BriefPG) CreateDB(ctx context.Context, dbName, createArgs string) (str
 	}
 	scmd := fmt.Sprintf("CREATE DATABASE \"%s\" %s", dbName, createArgs)
 	cmd := exec.Command(bp.pgCmds["psql"], "-c", scmd, bp.DBUri("postgres"))
-	bp.Logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
+	bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 	cmdOut, err := cmd.CombinedOutput()
 	for _, line := range strings.Split(strings.TrimSpace(string(cmdOut)), "\n") {
-		bp.Logf("briefpg: %s\n", line)
+		bp.logf("briefpg: %s\n", line)
 	}
 	if err != nil {
 		return "", wrapExecErr("CreateDB failed", cmd, err)
@@ -328,7 +346,7 @@ func (bp *BriefPG) DumpDB(ctx context.Context, dbName string, w io.Writer) error
 	if err != nil {
 		return err
 	}
-	bp.Logf("briefpg: starting dump: %s\n", strings.Join(cmd.Args, " "))
+	bp.logf("briefpg: starting dump: %s\n", strings.Join(cmd.Args, " "))
 	err = cmd.Start()
 	if err != nil {
 		return err
@@ -352,16 +370,16 @@ func (bp *BriefPG) DBUri(dbName string) string {
 func (bp *BriefPG) Fini(ctx context.Context) error {
 	if bp.state >= stateServerStarted {
 		cmd := exec.Command(bp.pgCmds["pg_ctl"], "-m", "immediate", "-w", "-D", bp.DbDir(), "stop")
-		bp.Logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
+		bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 		cmdOut, err := cmd.CombinedOutput()
-		bp.Logf("briefpg: %s\n", string(cmdOut))
 		if err != nil {
+			bp.logf("briefpg: %s\n", string(cmdOut))
 			return wrapExecErr("Fini failed", cmd, err)
 		}
 	}
 
 	if bp.state >= statePresent {
-		bp.Logf("briefpg: cleaning up %s\n", bp.TmpDir)
+		bp.logf("briefpg: cleaning up %s\n", bp.TmpDir)
 		os.RemoveAll(bp.TmpDir)
 	}
 
