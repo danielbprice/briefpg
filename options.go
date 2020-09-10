@@ -44,3 +44,26 @@ func OptLogFunc(logf LogFunction) Option {
 		return nil
 	})
 }
+
+// OptTmpDir returns an Option which sets the temporary directory where the
+// postgres database will put its files.  If no user-specified OptTmpDir is
+// set, ioutil.TempDir is used to create one automatically.  The caller is
+// responsible for making the TempDir.  This option can only be set before
+// calling Start().  If the TmpDir is specified, and user-created, it will not
+// be cleaned up when calling Fini() or MustFini().  If automatically created,
+// it will be automatically cleaned up.
+func OptTmpDir(dir string) Option {
+	return optionFunc(func(bpg *BriefPG) error {
+		return bpg.setTmpDir(dir)
+	})
+}
+
+// OptPostgresEncoding returns an Option which sets the -E argument to the
+// postgres 'initdb' command; this sets the default encoding for new databases.
+// If not set, the default is UNICODE.  This option can only be set before
+// calling Start().
+func OptPostgresEncoding(enc string) Option {
+	return optionFunc(func(bpg *BriefPG) error {
+		return bpg.setPostgresEncoding(enc)
+	})
+}

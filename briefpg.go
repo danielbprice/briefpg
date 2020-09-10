@@ -79,14 +79,14 @@ type cmdMap map[string]string
 // BriefPG represents a managed instance of the Postgres database server; the
 // instance and all associated data is disposed when Fini() is called.
 type BriefPG struct {
-	TmpDir         string      // Can be user-set if desired
-	Encoding       string      // Defaults to "UNICODE"
-	DirPrefix      string      // Directory component prefix (e.g. "briefpg.jane.")
-	pgVer          string      // Detected postgres version
-	PgConfTemplate string      // Postgres Config File template
-	logf           LogFunction // Verbose output
+	tmpDir         string      // Set with OptTmpDir
+	madeTmpDir     bool        // Set when the TmpDir was created automatically
+	encoding       string      // Defaults to "UNICODE", set with OptPostgresEncoding
+	pgConfTemplate string      // Postgres Config File template, set with OptPgConfTemplate
+	logf           LogFunction // Verbose output, set with OptLogFunc
 	state          bpState
 	pgCmds         cmdMap
+	pgVer          string // Detected Postgres version corresponding to pgCmds
 }
 
 var utilities = []string{"psql", "initdb", "pg_ctl", "pg_dump"}
@@ -148,7 +148,8 @@ pathLoop:
 	}
 
 	if len(pgCmds) == 0 {
-		return nil, xerrors.Errorf("couldn't find Postgres; tried %s", strings.Join(allPaths, ":"))
+		return nil, xerrors.Errorf("couldn't find Postgres; tried %s",
+			strings.Join(allPaths, ":"))
 	}
 	return pgCmds, nil
 }
@@ -168,21 +169,14 @@ func PostgresInstalled(path string) error {
 func New(options ...Option) (*BriefPG, error) {
 	bpg := &BriefPG{
 		state:          stateUninitialized,
-		Encoding:       "UNICODE",
+		encoding:       "UNICODE",
 		logf:           NullLogFunction,
-		DirPrefix:      "briefpg.",
 		pgCmds:         nil,
-		PgConfTemplate: DefaultPgConfTemplate,
-	}
-
-	// Refine the prefix if we can
-	user, err := user.Current()
-	if err == nil && user.Username != "" {
-		bpg.DirPrefix = fmt.Sprintf("briefpg.%s.", user.Username)
+		pgConfTemplate: DefaultPgConfTemplate,
 	}
 
 	for _, o := range options {
-		err = o.apply(bpg)
+		err := o.apply(bpg)
 		if err != nil {
 			return nil, xerrors.Errorf("Failed applying option: %w", err)
 		}
@@ -197,13 +191,6 @@ func New(options ...Option) (*BriefPG, error) {
 		}
 	}
 
-	outb, err := exec.Command(bpg.pgCmds["pg_ctl"], "-V").Output()
-	if err != nil {
-		return nil, xerrors.Errorf("Failed running pg_ctl -V: %w", err)
-	}
-	out := strings.TrimSpace(string(outb))
-	sl := strings.Split(out, " ")
-	bpg.pgVer = sl[len(sl)-1]
 	return bpg, nil
 }
 
@@ -211,25 +198,61 @@ func (bp *BriefPG) SetOption(o Option) error {
 	return o.apply(bp)
 }
 
+// setPostgresPath looks for postgres at the indicated location.  If not
+// present, it fails.  This is also when we harvest the postgres version.
 func (bp *BriefPG) setPostgresPath(pgPath string) error {
 	var err error
+
+	if bp.state >= stateInitialized {
+		return xerrors.Errorf("postgres path cannot be set after db has been initialized")
+	}
 	bp.pgCmds, err = findPostgres(pgPath)
 	if err != nil {
 		return err
 	}
+
+	outb, err := exec.Command(bp.pgCmds["pg_ctl"], "-V").Output()
+	if err != nil {
+		return xerrors.Errorf("Failed running pg_ctl -V: %w", err)
+	}
+	out := strings.TrimSpace(string(outb))
+	sl := strings.Split(out, " ")
+	bp.pgVer = sl[len(sl)-1]
+	return nil
+}
+
+func (bp *BriefPG) setTmpDir(tmpDir string) error {
+	if bp.madeTmpDir {
+		return xerrors.Errorf("tmpdir cannot be set after tmpdir has been created")
+	}
+	bp.tmpDir = tmpDir
+	return nil
+}
+
+func (bp *BriefPG) setPostgresEncoding(enc string) error {
+	bp.encoding = enc
 	return nil
 }
 
 func (bp *BriefPG) mkTemp() error {
 	var err error
-	bp.TmpDir, err = ioutil.TempDir("", bp.DirPrefix)
+
+	dirPrefix := "briefpg."
+	// Refine the prefix if we can
+	user, err := user.Current()
+	if err == nil && user.Username != "" {
+		dirPrefix = fmt.Sprintf("briefpg.%s.", user.Username)
+	}
+
+	bp.tmpDir, err = ioutil.TempDir("", dirPrefix)
 	if err != nil {
 		return xerrors.Errorf("Failed to make tmpdir: %w", err)
 	}
+	bp.madeTmpDir = true
 	return nil
 }
 
-// PgVer returns the detected version of Postgres, as returned by
+// PgVer returns the detected version of Postgres
 func (bp *BriefPG) PgVer() string {
 	return bp.pgVer
 }
@@ -238,22 +261,23 @@ func (bp *BriefPG) PgVer() string {
 // general, this should not be needed when writing tests, but it is provided
 // for completeness.
 func (bp *BriefPG) DbDir() string {
-	return filepath.Join(bp.TmpDir, bp.pgVer)
+	return filepath.Join(bp.tmpDir, bp.pgVer)
 }
 
 func (bp *BriefPG) initDB(ctx context.Context) error {
-	if bp.TmpDir == "" {
+	if bp.tmpDir == "" {
 		if err := bp.mkTemp(); err != nil {
 			return err
 		}
 		bp.state = statePresent
-	} else if _, err := os.Stat(bp.TmpDir); err != nil {
+	} else if _, err := os.Stat(bp.tmpDir); err != nil {
 		bp.state = stateNotPresent
-		return xerrors.Errorf("Tmpdir %s not present or not readable: %w", bp.TmpDir, err)
+		return xerrors.Errorf("Tmpdir %s not present or not readable: %w", bp.tmpDir, err)
 	}
 
 	if _, err := os.Stat(bp.DbDir()); err != nil {
-		cmd := exec.Command(bp.pgCmds["initdb"], "--nosync", "-U", "postgres", "-D", bp.DbDir(), "-E", bp.Encoding, "-A", "trust")
+		cmd := exec.Command(bp.pgCmds["initdb"], "--nosync", "-U", "postgres",
+			"-D", bp.DbDir(), "-E", bp.encoding, "-A", "trust")
 		bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 		cmdOut, err := cmd.CombinedOutput()
 		if err != nil {
@@ -263,7 +287,7 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 	}
 	confFile := filepath.Join(bp.DbDir(), "postgresql.conf")
 	bp.logf("briefpg: generating %s\n", confFile)
-	tmpl, err := template.New("postgresql.conf").Parse(bp.PgConfTemplate)
+	tmpl, err := template.New("postgresql.conf").Parse(bp.pgConfTemplate)
 	if err != nil {
 		return xerrors.Errorf("initDB failed to parse postgresql.conf template: %w", err)
 	}
@@ -276,7 +300,7 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 	bpConf := struct {
 		TmpDir string
 	}{
-		TmpDir: bp.TmpDir,
+		TmpDir: bp.tmpDir,
 	}
 	err = tmpl.Execute(conf, bpConf)
 	if err != nil {
@@ -303,7 +327,8 @@ func (bp *BriefPG) Start(ctx context.Context) error {
 	userOpts := "" // XXX
 	postgresOpts := fmt.Sprintf("-c listen_addresses='' %s", userOpts)
 	logFile := filepath.Join(bp.DbDir(), "postgres.log")
-	cmd := exec.Command(bp.pgCmds["pg_ctl"], "-w", "-o", postgresOpts, "-s", "-D", bp.DbDir(), "-l", logFile, "start")
+	cmd := exec.Command(bp.pgCmds["pg_ctl"], "-w", "-o", postgresOpts, "-s",
+		"-D", bp.DbDir(), "-l", logFile, "start")
 	bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 	cmdOut, err := cmd.CombinedOutput()
 	if err != nil {
@@ -314,10 +339,10 @@ func (bp *BriefPG) Start(ctx context.Context) error {
 	return nil
 }
 
-// CreateDB is a convenience function to create a named database; you can do this
-// using your database driver instead, at lower cost.  This routine uses 'psql' to
-// do the job.  The primary use case is to rapidly set up an empty database for
-// test purposes.  The URI to access the database is returned.
+// CreateDB is a convenience function to create a named database; you can do
+// this using your database driver instead, at lower cost.  This routine uses
+// 'psql' to do the job.  The primary use case is to rapidly set up an empty
+// database for test purposes.  The URI to access the database is returned.
 func (bp *BriefPG) CreateDB(ctx context.Context, dbName, createArgs string) (string, error) {
 	if bp.state < stateServerStarted {
 		return "", xerrors.Errorf("Server not started; cannot create database")
@@ -363,13 +388,14 @@ func (bp *BriefPG) DumpDB(ctx context.Context, dbName string, w io.Writer) error
 
 // DBUri returns the connection URI for a named database
 func (bp *BriefPG) DBUri(dbName string) string {
-	return fmt.Sprintf("postgresql:///%s?host=%s&user=postgres", dbName, bp.TmpDir)
+	return fmt.Sprintf("postgresql:///%s?host=%s&user=postgres", dbName, bp.tmpDir)
 }
 
 // Fini stops the database server, if running, and cleans it up
 func (bp *BriefPG) Fini(ctx context.Context) error {
 	if bp.state >= stateServerStarted {
-		cmd := exec.Command(bp.pgCmds["pg_ctl"], "-m", "immediate", "-w", "-D", bp.DbDir(), "stop")
+		cmd := exec.Command(bp.pgCmds["pg_ctl"], "-m", "immediate", "-w",
+			"-D", bp.DbDir(), "stop")
 		bp.logf("briefpg: %s\n", strings.Join(cmd.Args, " "))
 		cmdOut, err := cmd.CombinedOutput()
 		if err != nil {
@@ -379,8 +405,10 @@ func (bp *BriefPG) Fini(ctx context.Context) error {
 	}
 
 	if bp.state >= statePresent {
-		bp.logf("briefpg: cleaning up %s\n", bp.TmpDir)
-		os.RemoveAll(bp.TmpDir)
+		if bp.madeTmpDir {
+			bp.logf("briefpg: cleaning up %s\n", bp.tmpDir)
+			os.RemoveAll(bp.tmpDir)
+		}
 	}
 
 	bp.state = stateDefunct
