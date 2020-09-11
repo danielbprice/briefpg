@@ -194,6 +194,9 @@ func New(options ...Option) (*BriefPG, error) {
 	return bpg, nil
 }
 
+// SetOption applies an Option to the BriefPG.  The option may fail to apply if
+// invalid, or if the the BriefPG is in a state where applying the option is
+// impossible.  Passing Options to New() is preferred.
 func (bp *BriefPG) SetOption(o Option) error {
 	return o.apply(bp)
 }
