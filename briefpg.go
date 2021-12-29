@@ -32,8 +32,6 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
-
-	"golang.org/x/xerrors"
 )
 
 const (
@@ -102,10 +100,10 @@ var tryGlobs = []string{
 func wrapExecErr(msg string, cmd *exec.Cmd, err error) error {
 	args := strings.Join(cmd.Args, " ")
 	if xerr, ok := err.(*exec.ExitError); ok {
-		return xerrors.Errorf("%s; command: %s; stderr: %s: %w",
+		return fmt.Errorf("%s; command: %s; stderr: %s: %w",
 			msg, args, xerr.Stderr, xerr)
 	}
-	return xerrors.Errorf("%s", msg)
+	return fmt.Errorf("%s", msg)
 }
 
 // findPostgres will look for a valid Postgres instance in path.  If path is
@@ -148,7 +146,7 @@ pathLoop:
 	}
 
 	if len(pgCmds) == 0 {
-		return nil, xerrors.Errorf("couldn't find Postgres; tried %s",
+		return nil, fmt.Errorf("couldn't find Postgres; tried %s",
 			strings.Join(allPaths, ":"))
 	}
 	return pgCmds, nil
@@ -178,7 +176,7 @@ func New(options ...Option) (*BriefPG, error) {
 	for _, o := range options {
 		err := o.apply(bpg)
 		if err != nil {
-			return nil, xerrors.Errorf("Failed applying option: %w", err)
+			return nil, fmt.Errorf("Failed applying option: %w", err)
 		}
 	}
 
@@ -187,7 +185,7 @@ func New(options ...Option) (*BriefPG, error) {
 	if bpg.pgCmds == nil {
 		err := bpg.setPostgresPath("")
 		if err != nil {
-			return nil, xerrors.Errorf("Unable to find Postgres")
+			return nil, fmt.Errorf("Unable to find Postgres")
 		}
 	}
 
@@ -207,7 +205,7 @@ func (bp *BriefPG) setPostgresPath(pgPath string) error {
 	var err error
 
 	if bp.state >= stateInitialized {
-		return xerrors.Errorf("postgres path cannot be set after db has been initialized")
+		return fmt.Errorf("postgres path cannot be set after db has been initialized")
 	}
 	bp.pgCmds, err = findPostgres(pgPath)
 	if err != nil {
@@ -216,7 +214,7 @@ func (bp *BriefPG) setPostgresPath(pgPath string) error {
 
 	outb, err := exec.Command(bp.pgCmds["pg_ctl"], "-V").Output()
 	if err != nil {
-		return xerrors.Errorf("Failed running pg_ctl -V: %w", err)
+		return fmt.Errorf("Failed running pg_ctl -V: %w", err)
 	}
 	out := strings.TrimSpace(string(outb))
 	sl := strings.Split(out, " ")
@@ -226,7 +224,7 @@ func (bp *BriefPG) setPostgresPath(pgPath string) error {
 
 func (bp *BriefPG) setTmpDir(tmpDir string) error {
 	if bp.madeTmpDir {
-		return xerrors.Errorf("tmpdir cannot be set after tmpdir has been created")
+		return fmt.Errorf("tmpdir cannot be set after tmpdir has been created")
 	}
 	bp.tmpDir = tmpDir
 	return nil
@@ -249,7 +247,7 @@ func (bp *BriefPG) mkTemp() error {
 
 	bp.tmpDir, err = ioutil.TempDir("", dirPrefix)
 	if err != nil {
-		return xerrors.Errorf("Failed to make tmpdir: %w", err)
+		return fmt.Errorf("Failed to make tmpdir: %w", err)
 	}
 	bp.madeTmpDir = true
 	return nil
@@ -275,7 +273,7 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 		bp.state = statePresent
 	} else if _, err := os.Stat(bp.tmpDir); err != nil {
 		bp.state = stateNotPresent
-		return xerrors.Errorf("Tmpdir %s not present or not readable: %w", bp.tmpDir, err)
+		return fmt.Errorf("Tmpdir %s not present or not readable: %w", bp.tmpDir, err)
 	}
 
 	if _, err := os.Stat(bp.DbDir()); err != nil {
@@ -292,11 +290,11 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 	bp.logf("briefpg: generating %s\n", confFile)
 	tmpl, err := template.New("postgresql.conf").Parse(bp.pgConfTemplate)
 	if err != nil {
-		return xerrors.Errorf("initDB failed to parse postgresql.conf template: %w", err)
+		return fmt.Errorf("initDB failed to parse postgresql.conf template: %w", err)
 	}
 	conf, err := os.OpenFile(confFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return xerrors.Errorf("initDB failed to open config: %w", err)
+		return fmt.Errorf("initDB failed to open config: %w", err)
 	}
 	defer conf.Close()
 
@@ -307,7 +305,7 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 	}
 	err = tmpl.Execute(conf, bpConf)
 	if err != nil {
-		return xerrors.Errorf("initDB failed to execute template: %w", err)
+		return fmt.Errorf("initDB failed to execute template: %w", err)
 	}
 	bp.state = stateInitialized
 	return nil
@@ -317,7 +315,7 @@ func (bp *BriefPG) initDB(ctx context.Context) error {
 func (bp *BriefPG) Start(ctx context.Context) error {
 	var err error
 	if bp.state == stateDefunct {
-		return xerrors.Errorf("briefpg instance is defunct")
+		return fmt.Errorf("briefpg instance is defunct")
 	}
 
 	if bp.state < stateInitialized {
@@ -348,7 +346,7 @@ func (bp *BriefPG) Start(ctx context.Context) error {
 // database for test purposes.  The URI to access the database is returned.
 func (bp *BriefPG) CreateDB(ctx context.Context, dbName, createArgs string) (string, error) {
 	if bp.state < stateServerStarted {
-		return "", xerrors.Errorf("Server not started; cannot create database")
+		return "", fmt.Errorf("Server not started; cannot create database")
 	}
 	scmd := fmt.Sprintf("CREATE DATABASE \"%s\" %s", dbName, createArgs)
 	cmd := exec.Command(bp.pgCmds["psql"], "-c", scmd, bp.DBUri("postgres"))
@@ -367,7 +365,7 @@ func (bp *BriefPG) CreateDB(ctx context.Context, dbName, createArgs string) (str
 // case, this can be used to dump the database in the event of a failure.
 func (bp *BriefPG) DumpDB(ctx context.Context, dbName string, w io.Writer) error {
 	if bp.state < stateServerStarted {
-		return xerrors.Errorf("Server not started; cannot dump database")
+		return fmt.Errorf("Server not started; cannot dump database")
 	}
 	cmd := exec.Command(bp.pgCmds["pg_dump"], bp.DBUri(dbName))
 	stdout, err := cmd.StdoutPipe()

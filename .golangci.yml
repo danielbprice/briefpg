@@ -2,7 +2,7 @@
 
 linters:
   enable:
-    - golint
+    - revive
 
 issues:
   include:
